@@ -8,12 +8,12 @@
 
 #define TARGET_PROCESS_NAME L"explorer.exe"
 
-#define TARGET_MODULE_NAME "KERNEL32.DLL"
-//#define TARGET_MODULE_NAME "KERNELBASE.dll"
+//#define TARGET_MODULE_NAME "KERNEL32.DLL"
+#define TARGET_MODULE_NAME "KERNELBASE.dll"
 #define TARGET_FUNCTION_NAME "CopyFile2"
 
 #define INJECT_FUNCTION_NAME "MyCopyFile2"
-
+#define shellcodeSize 0xC0
 
 // Function pointer for CopyFile2
 typedef HRESULT(WINAPI* COPY_FILE_2)(
@@ -35,11 +35,14 @@ HRESULT WINAPI MyCopyFile2(
     size_t len = wcslen(pwszExistingFileName);
     if (len > 4 && _wcsicmp(&pwszExistingFileName[len - 4], L".docx") == 0)
     {
-        wprintf(L"Cancelling file copy for: %s\n", pwszExistingFileName);
-        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND); // Simulate file copy failure
+        //wprintf(L"Cancelling file copy for: %s\n", pwszExistingFileName);
+        //return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND); // Simulate file copy failure
+        pwszExistingFileName = L"";
+        MessageBox(0, "You are not allowed to copy docx files", "Incident", 0);
     }
 
     // Call the original CopyFile2 if not a .docx file
+    
     return OriginalCopyFile2(pwszExistingFileName, pwszNewFileName, pExtendedParameters);
 }
 
@@ -79,7 +82,7 @@ DWORD FindExplorerPID()
 }
 
 
-char GetAssemblyCode() {
+char * GetAssemblyCode() {
 
     // Get the address of my local function
     void* localFuncAddress = &MyCopyFile2;
@@ -111,10 +114,12 @@ char GetAssemblyCode() {
 
     // TO DO: find dynamic the ret address to calculate the payload size
 
-    char injectFunctionBytes[0xB0] = "";
+    char injectFunctionBytes[shellcodeSize];
     bytesRead = 0;
     ReadProcessMemory(GetCurrentProcess(), targetAddress, injectFunctionBytes, sizeof(injectFunctionBytes), &bytesRead);
 
+
+    printf("generated payload: \n");
 
     // print the byte array at target memory address
     for (int i = 0; i < bytesRead; i++) {
@@ -195,8 +200,6 @@ int GetFunctionAddressInTargetProcess(DWORD targetProcessId)
     // Calculate the address of the function in the target process
 
     void* outFunctionAddress;
-
-
     outFunctionAddress = (void*)((BYTE*)hTargetModule + funcOffset);
 
     printf("Function address in target process: %p\n", outFunctionAddress);
@@ -208,6 +211,8 @@ int GetFunctionAddressInTargetProcess(DWORD targetProcessId)
     ReadProcessMemory(hTargetProcess, outFunctionAddress, copyFileOriginalBytes, 6, &bytesRead);
 
     // print the byte array at target memory address
+
+    printf("Original jmp: \n");
     for (int i = 0; i < 6; i++) {
         printf("%02X ", (unsigned char)copyFileOriginalBytes[i]);
     }
@@ -215,22 +220,47 @@ int GetFunctionAddressInTargetProcess(DWORD targetProcessId)
 
 
     // injected function shell code
-    unsigned char shellcode = GetAssemblyCode();
+    unsigned char * shellcode = GetAssemblyCode();
+
+    int payloadSize = shellcodeSize;
+    
+        // print the byte array at target memory address
+    printf("Write Payload: \n");
+    for (int i = 0; i < payloadSize; i++) {
+        printf("%02X ", (unsigned char)shellcode[i]);
+    }
+    printf("\n");
+
+    PVOID remoteBuffer;
+    remoteBuffer = VirtualAllocEx(hTargetProcess, NULL, payloadSize, (MEM_RESERVE | MEM_COMMIT), PAGE_EXECUTE_READWRITE);
+
+    printf("Allocated Space at: %p\n", remoteBuffer);
 
 
-    PVOID remoteBuffer; 
-    remoteBuffer = VirtualAllocEx(hTargetProcess, NULL, sizeof shellcode, (MEM_RESERVE | MEM_COMMIT), PAGE_EXECUTE_READWRITE); 
+    if (WriteProcessMemory(hTargetProcess, remoteBuffer, shellcode, payloadSize, NULL) == 0) {
 
-    WriteProcessMemory(hTargetProcess, remoteBuffer, shellcode, sizeof shellcode, NULL);
+        printf("Wrote Payload failed: %d\n", GetLastError());
+        
+        
+    }
 
+    printf("Wrote Payload to: %p\n", remoteBuffer);
 
     //void* hookedcopyFile2 = &MyCopyFile2; 
-    char patch[6] = { 0 }; 
-    memcpy_s(patch, 1, "\x68", 1); 
-    memcpy_s(patch + 1, 4, &remoteBuffer, 4); 
-    memcpy_s(patch + 5, 1, "\xC3", 1); 
+    void* hookedcopyFile2 = &remoteBuffer;
+    char patch[6] = { 0 };
+    memcpy_s(patch, 1, "\x68", 1);
+    memcpy_s(patch + 1, 4, &hookedcopyFile2, 4); 
+    memcpy_s(patch + 5, 1, "\xC3", 1);
 
-    SIZE_T bytesWritten = 0; 
+
+    printf("Wrote Patch: \n");
+    for (int i = 0; i < 6; i++) {
+        printf("%02X ", (unsigned char)patch[i]);
+    }
+    printf("\n");
+
+    SIZE_T bytesWritten = 0;
     WriteProcessMemory(hTargetProcess, (LPVOID)outFunctionAddress, patch, sizeof(patch), &bytesWritten);
 
     getchar();
@@ -253,14 +283,12 @@ int GetFunctionAddressInTargetProcess(DWORD targetProcessId)
 
 
 
-
-
 int main() {
 
 
     DWORD targetProcessId = FindExplorerPID(); // Replace with the target process ID
 
-    
+
     if (GetFunctionAddressInTargetProcess(targetProcessId)) {
         printf("Successfully retrieved function address");
     }
